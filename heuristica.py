@@ -1,165 +1,245 @@
+from __future__ import annotations
+
+import heapq
+import time
+from dataclasses import dataclass, field
+
 from strategy import strategy_bombero
 from area import Area
 from celdas import est_celda
+from comp_fuego import fuego
 
+# Movements in 8 directions plus stay still (used for branching).
 NEIS8: list[tuple[int, int]] = [
     (-1, -1), (-1, 0), (-1, 1),
     (0, -1),            (0, 1),
     (1, -1),  (1, 0),  (1, 1),
 ]
-# La heuristica es bastante sencilla y tiene la logica de primero buscar el centro del fuego
-# Luego busca la pared mas cercana y luego otra pared; la idea es ir cerrando el fuego con un cortafuegos
-# cerrando el cortafuegos
-# La heuristica va dando scores segun el movimiento, penalizando los no deseados para forzar paredes o el centro
-# del fuego cuando lo necesite, y tras visitar dos paredes continua encadenando nuevas paredes para mantener el cortafuegos.
-class paredes(strategy_bombero): # Clase de la heuristica
+MOVES: list[tuple[int, int]] = [(0, 0)] + NEIS8
 
-    def __init__(self,
-                 dist_fuego_umbral: int = 2,
-                 w_ir_fuego: float = 5.0,
-                 w_ir_pared: float = 6.0,
-                 inercia: float = 0.3):
-        self.fase: str = "a_fuego"  # a_fuego -> a_pared -> a_otra_pared -> ciclo de paredes
-        self.pared_objetivo: str | None = None  # 'arriba','abajo','izquierda','derecha'
-        self.pared_previa: str | None = None
-        self._prev_move: tuple[int, int] = (0, 0)
-        self.dist_fuego_umbral = dist_fuego_umbral
-        self.w_ir_fuego = w_ir_fuego
-        self.w_ir_pared = w_ir_pared
-        self.inercia = inercia
 
-    def _dist_chebyshev_a_fuego(self, r: int, c: int, area: Area) -> int: #Establece el centro del fuego
-        fuego = area.positions(est_celda.fuego)
-        if not fuego:
-            return 10**9
-        best = 10**9
-        for fr, fc in fuego:
-            d = max(abs(fr - r), abs(fc - c))
-            if d < best:
-                best = d
-        return best
+@dataclass(order=True)
+class SearchNode:
+    """State inside the Branch & Bound tree."""
 
-    def _dist_a_pared(self, r: int, c: int, area: Area, pared: str) -> int: #Da las distancias a las 4 paredes posibles
-        n = area.n
-        if pared == 'arriba':
-            return r
-        if pared == 'abajo':
-            return (n - 1) - r
-        if pared == 'izquierda':
-            return c
-        if pared == 'derecha':
-            return (n - 1) - c
-        return 10**9
+    priority: float
+    depth: int
+    cost: float
+    pos: tuple[int, int] = field(compare=False)
+    area: Area = field(compare=False)
+    forbidden: set[tuple[int, int]] = field(compare=False)
+    path: list[tuple[int, int]] = field(compare=False, default_factory=list)
+    counts: tuple[int, int, int] = field(compare=False, default=(0, 0, 0))
 
-    def _paredes_por_cercania(self, r: int, c: int, area: Area) -> list[str]: # Ordenas las paredes segun su distancia previa
-        items = [
-            ('arriba', self._dist_a_pared(r, c, area, 'arriba')),
-            ('abajo', self._dist_a_pared(r, c, area, 'abajo')),
-            ('izquierda', self._dist_a_pared(r, c, area, 'izquierda')),
-            ('derecha', self._dist_a_pared(r, c, area, 'derecha')),
-        ]
-        items.sort(key=lambda x: x[1])
-        return [p for p, _ in items]
 
-    def _elige_pared(self, r: int, c: int, area: Area, distinta: str | None) -> str: #Elige la pared a moverse
-        for p in self._paredes_por_cercania(r, c, area):
-            if p != distinta:
-                return p
-        return 'arriba'
+class BranchAndBound(strategy_bombero):
+    """
+    Estrategia de Branch & Bound con cola de prioridad y poda.
+    Explora un arbol de movimientos para los siguientes ticks y
+    elige el siguiente paso minimizando la cantidad de celdas quemadas.
+    """
 
-    def _buildable(self, r: int, c: int, ci: int, cj: int, area: Area) -> bool: #Ve si es posible el mov
-        if (r, c) == (ci, cj):
-            return True
-        return area.matrix[r][c] == est_celda.sn_af
+    def __init__(
+        self,
+        lookahead: int = 3,
+        node_limit: int = 2_000,
+        time_limit: float = 0.25,
+    ):
+        self.lookahead = lookahead
+        self.node_limit = node_limit
+        self.time_limit = time_limit
+        self._fire = fuego(tasa_crecimiento=1)
+        self.total_nodes = 0
+        self.total_time = 0.0
+        self._last_report: dict[str, object] = {}
 
-    def siguiente_paso(self, i: int, j: int, area: Area, forbidden: set[tuple[int, int]]) -> tuple[int, int]: #Maneja el paso del bombero
-        if not area.positions(est_celda.fuego):
-            return i, j
+    # -------- utilidades internas --------
+    def _clone_area(self, area: Area) -> Area:
+        return Area([row.copy() for row in area.matrix], tick=area.tick)
 
-        if self.fase in ("a_pared", "a_otra_pared") and self.pared_objetivo is None: #Vemos si la pared ya se elegio o no
-            distinta = self.pared_previa if self.fase == "a_otra_pared" else None
-            self.pared_objetivo = self._elige_pared(i, j, area, distinta)
+    def _cost(self, counts: tuple[int, int, int], depth: int) -> float:
+        libres, quemadas, cortafuegos = counts
+        return float(quemadas) - 0.05 * cortafuegos + 0.15 * depth
 
-        df0 = self._dist_chebyshev_a_fuego(i, j, area)
+    def _bound(self, cost: float) -> float:
+        # cost es ya una cota optimista: no anticipamos quemados extra.
+        return cost
 
-        def score(ni: int, nj: int) -> float: # Puntajes por movimientos
-            if not area.dentro(ni, nj): # Para no salir del area o grilla
-                return -1e18
-            if (ni, nj) in forbidden: #Area a las que no se puede ir (quemadas)
-                return -1e18
-            if not self._buildable(ni, nj, i, j, area): #Ya pasadas por aqui
-                return -1e18
-            
-            #No quedarse quieto
-            s = 0.0
-            if (ni, nj) == (i, j):
-                s -= 0.2
+    def _valid_moves(self, node: SearchNode) -> list[tuple[int, int]]:
+        ci, cj = node.pos
+        moves: list[tuple[int, int]] = []
+        for di, dj in MOVES:
+            ni, nj = ci + di, cj + dj
+            if not node.area.dentro(ni, nj):
+                continue
+            if (ni, nj) in node.forbidden:
+                continue
+            if node.area.matrix[ni][nj] != est_celda.sn_af:
+                continue
+            moves.append((ni, nj))
+        return moves
 
-            #Mantener inercia para evitar que se estanque
-            mdi, mdj = ni - i, nj - j
-            pdi, pdj = self._prev_move
-            if (mdi, mdj) == (pdi, pdj):
-                s += self.inercia
-            elif (mdi, mdj) == (-pdi, -pdj):
-                s -= 1.2 * self.inercia
+    def _simulate_transition(
+        self,
+        node: SearchNode,
+        move: tuple[int, int],
+    ) -> SearchNode | None:
+        ci, cj = node.pos
+        ni, nj = move
 
-            #Favorece ortogonales
-            if abs(mdi) + abs(mdj) == 1:
-                s += 0.15
+        area_copy = self._clone_area(node.area)
 
-            # Movere al fuego
-            df = self._dist_chebyshev_a_fuego(ni, nj, area)
-            mejora_fuego = df0 - df
-            if self.fase == "a_fuego":
-                s += self.w_ir_fuego * mejora_fuego - 0.05 * df
-            else:
-                s += 0.2 * mejora_fuego
+        # Mantenemos el cortafuego en la celda anterior.
+        if area_copy.matrix[ci][cj] == est_celda.bomb:
+            area_copy.matrix[ci][cj] = est_celda.c_fuego
 
-            # Moverse a pared
-            if self.fase in ("a_pared", "a_otra_pared") and self.pared_objetivo is not None:
-                d0 = self._dist_a_pared(i, j, area, self.pared_objetivo)
-                d1 = self._dist_a_pared(ni, nj, area, self.pared_objetivo)
-                mejora_pared = d0 - d1
-                s += self.w_ir_pared * mejora_pared - 0.02 * d1
+        # Fin del tick actual: el bombero se mueve.
+        area_copy.matrix[ni][nj] = est_celda.bomb
 
-                if self.fase == "a_otra_pared" and self.pared_previa is not None:
-                    dprev0 = self._dist_a_pared(i, j, area, self.pared_previa)
-                    dprev1 = self._dist_a_pared(ni, nj, area, self.pared_previa)
-                    # Penaliza ir hacia la pared previa
-                    s -= 0.5 * max(0, dprev0 - dprev1)
+        # Inicio del siguiente tick: coloca cortafuego y avanza fuego.
+        area_copy.matrix[ni][nj] = est_celda.c_fuego
+        area_copy.tick = node.area.tick + 1
 
-            return s
+        to_burn = self._fire.a_quemar(area_copy)
+        self._fire.aplicar(area_copy, to_burn)
 
-        #construir movimientos en base a los pesos generados
-        moves = [(0, 0)] + NEIS8
-        best = (i, j)
-        best_s = -1e19
-        for di, dj in moves:
-            ni, nj = i + di, j + dj
-            sc = score(ni, nj)
-            if sc > best_s:
-                best_s = sc
-                best = (ni, nj)
+        forbidden_next = self._fire.a_quemar(area_copy)
+        counts = area_copy.counts()
+        cost = self._cost(counts, node.depth + 1)
+        bound = self._bound(cost)
+        path = node.path + [(ni, nj)]
 
-        self._prev_move = (best[0] - i, best[1] - j)
+        return SearchNode(
+            priority=bound,
+            depth=node.depth + 1,
+            cost=cost,
+            pos=(ni, nj),
+            area=area_copy,
+            forbidden=forbidden_next,
+            path=path,
+            counts=counts,
+        )
 
-        bi, bj = best
-        df1 = self._dist_chebyshev_a_fuego(bi, bj, area)
+    # -------- API principal --------
+    def siguiente_paso(
+        self,
+        i: int,
+        j: int,
+        area: Area,
+        forbidden: set[tuple[int, int]],
+    ) -> tuple[int, int]:
+        start = time.perf_counter()
 
-        #Define fases de la heuristica
-        if self.fase == "a_fuego":
-            if df1 <= self.dist_fuego_umbral:
-                self.fase = "a_pared"
-                self.pared_objetivo = self._elige_pared(bi, bj, area, distinta=None)
-        elif self.fase in ("a_pared", "a_otra_pared") and self.pared_objetivo is not None:
-            if self._dist_a_pared(bi, bj, area, self.pared_objetivo) == 0:
-                self.pared_previa = self.pared_objetivo
-                if self.fase == "a_pared":
-                    self.fase = "a_otra_pared"
-                    self.pared_objetivo = self._elige_pared(bi, bj, area, distinta=self.pared_previa)
-                else:
-                    # Tras alcanzar la segunda pared continuamos encadenando paredes
-                    self.fase = "a_pared"
-                    self.pared_objetivo = self._elige_pared(bi, bj, area, distinta=self.pared_previa)
+        root_area = self._clone_area(area)
+        if root_area.matrix[i][j] == est_celda.bomb:
+            root_area.matrix[i][j] = est_celda.c_fuego
+        root_counts = root_area.counts()
+        root_cost = self._cost(root_counts, depth=0)
 
-        return best
+        root = SearchNode(
+            priority=self._bound(root_cost),
+            depth=0,
+            cost=root_cost,
+            pos=(i, j),
+            area=root_area,
+            forbidden=set(forbidden),
+            path=[],
+            counts=root_counts,
+        )
+
+        queue: list[SearchNode] = [root]
+        best_node: SearchNode | None = None
+        best_cost = float("inf")
+        nodes_expanded = 0
+        status = "no_move"
+
+        while queue:
+            now = time.perf_counter()
+            if (now - start) >= self.time_limit:
+                status = "time_limit"
+                break
+            if nodes_expanded >= self.node_limit:
+                status = "node_limit"
+                break
+
+            node = heapq.heappop(queue)
+            if node.priority >= best_cost:
+                # poda por cota
+                continue
+
+            moves = self._valid_moves(node)
+
+            if node.depth >= self.lookahead or not moves:
+                if node.cost < best_cost:
+                    best_cost = node.cost
+                    best_node = node
+                    status = "ok"
+                continue
+
+            for mv in moves:
+                child = self._simulate_transition(node, mv)
+                if child is None:
+                    continue
+                nodes_expanded += 1
+                if child.priority >= best_cost:
+                    continue
+                heapq.heappush(queue, child)
+
+        elapsed = time.perf_counter() - start
+        self.total_nodes += nodes_expanded
+        self.total_time += elapsed
+
+        if best_node is None:
+            best_node = root
+            best_cost = root_cost
+
+        self._last_report = {
+            "nodes": nodes_expanded,
+            "status": status,
+            "elapsed_sec": elapsed,
+            "instants": best_node.depth,
+            "counts": {
+                "sin_afectar": best_node.counts[0],
+                "quemadas": best_node.counts[1],
+                "cortafuegos": best_node.counts[2],
+            },
+            "cerrado": best_node.area.limite(),
+        }
+
+        if best_node.path:
+            return best_node.path[0]
+
+        # Fallback: si no hay camino, mantenemos posicion.
+        return i, j
+
+    # -------- reportes --------
+    def ultima_busqueda(self) -> dict[str, object]:
+        return dict(self._last_report)
+
+    def resumen_global(
+        self,
+        area: Area | None = None,
+        wall_time: float | None = None,
+    ) -> dict[str, object]:
+        libres = quemadas = cortafuegos = None
+        cerrado = None
+        instantes = None
+        if area is not None:
+            libres, quemadas, cortafuegos = area.counts()
+            cerrado = area.limite()
+            instantes = area.tick
+        return {
+            "nodes": self.total_nodes,
+            "estrategia": self._last_report.get("status", "sin_busqueda"),
+            "tiempo_busqueda_sec": self.total_time,
+            "tiempo_total_sec": wall_time,
+            "instantes": instantes,
+            "sin_afectar": libres,
+            "quemadas": quemadas,
+            "cortafuegos": cortafuegos,
+            "cerrado": cerrado,
+        }
+
+
+# Alias para mantener compatibilidad con el nombre previo.
+paredes = BranchAndBound
