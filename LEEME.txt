@@ -1,0 +1,24 @@
+El siguiente archivo incluye algunas instrucciones para correr la simulación:
+
+1. La version básica sin funcionalidad novedosa, simplemente se debe correr el archivo "Sánchez_Baquedano_R.py", en cual solamente requiere de un archivo llamado "input.dat" al correrlo se le desplegara un meno que le otorgara todas las opciones requeridas para la tarea.
+
+	1.1. El archivo python mencionado usas multiples librerías creadas, en donde se encuentran distintas clases y funciones
+	     que ayudan a correr la simulación.
+	
+	1.2. El código debe ser corrido desde la misma carpeta en donde se encuentra todo, incluyen el "input.dat"
+
+
+2. La versión con funcionalidad novedosa debe correrse con el archivo "main2.py" y se debe tener en cuenta lo siguiente
+	2.1. Al correr el archivo este tomara el "input.dat" de manera automatica para crear un archivo html llamado 			     "visualizacion.html"
+
+	2.2. El archivo html ofrece una manera más interactiva de visualizar los resultados, con la posibilidad de hacer una 		     animación de todo el proceso de quemado y cortafuego, además tambien incluye el reporte y la posibilidad de ver el 
+	     estado en una instancia especifica, esto a traves del slider que dispone.
+
+	2.3. El archivo html se puede abrir directamente en el navegador al hace click desde los archivos, en caso de que no 	   	     abriera en el navegador pero si en un editor de codigo, debe seleccionarse la opción "abrir con"-->navegador para
+	     asi poder visualizarlo.
+
+	2.4. "main2.py" no requiere de instalación de librerias.
+
+
+Saludos! 
+Ramón
