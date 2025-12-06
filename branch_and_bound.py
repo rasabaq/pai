@@ -9,22 +9,29 @@ from area import Area
 from celdas import est_celda
 from comp_fuego import fuego
 
-# Movements in 8 directions plus stay still (used for branching).
+# Movimientos en 8 direcciones.
 NEIS8: list[tuple[int, int]] = [
     (-1, -1), (-1, 0), (-1, 1),
     (0, -1),            (0, 1),
     (1, -1),  (1, 0),  (1, 1),
 ]
+# Permite quedarse quieto (primer elemento) o moverse en las 8 direcciones.
 MOVES: list[tuple[int, int]] = [(0, 0)] + NEIS8
 
 
 @dataclass(order=True)
 class SearchNode:
-    """State inside the Branch & Bound tree."""
+    """State inside the Branch & Bound tree.
+
+    priority is the bound used in the priority queue (lower is better).
+    bnb_cost is the monotone cost (number of burned cells) used for pruning.
+    score is a heuristic value used only to compare leaves with the same cost.
+    """
 
     priority: float
     depth: int
-    cost: float
+    bnb_cost: float
+    score: float = field(compare=False)
     pos: tuple[int, int] = field(compare=False)
     area: Area = field(compare=False)
     forbidden: set[tuple[int, int]] = field(compare=False)
@@ -34,16 +41,19 @@ class SearchNode:
 
 class BranchAndBound(strategy_bombero):
     """
-    Estrategia de Branch & Bound con cola de prioridad y poda.
-    Explora un arbol de movimientos para los siguientes ticks y
-    elige el siguiente paso minimizando la cantidad de celdas quemadas.
+    Estrategia de Branch & Bound con cola de prioridad y poda:
+    - Cada nodo representa un estado simulado (posición, grilla, cortafuegos).
+    - La cola está ordenada por una cota optimista (menos quemadas primero).
+    - Se expande primero lo prometedor y se poda cuando la cota >= mejor solución.
+    - En hojas o al agotar lookahead se usa un rollout pesimista (dejar quieto)
+      para comparar soluciones por quemadas totales estimadas.
     """
 
     def __init__(
         self,
-        lookahead: int = 3,
+        lookahead: int = 5,
         node_limit: int = 2_000,
-        time_limit: float = 0.25,
+        time_limit: float = 5,
     ):
         self.lookahead = lookahead
         self.node_limit = node_limit
@@ -55,24 +65,54 @@ class BranchAndBound(strategy_bombero):
 
     # -------- utilidades internas --------
     def _clone_area(self, area: Area) -> Area:
+        # Copia ligera de la grilla para explorar una rama.
         return Area([row.copy() for row in area.matrix], tick=area.tick)
 
-    def _cost(self, counts: tuple[int, int, int], depth: int) -> float:
-        libres, quemadas, cortafuegos = counts
-        return float(quemadas) - 0.05 * cortafuegos + 0.15 * depth
+    def _bnb_cost(self, counts: tuple[int, int, int], depth: int) -> float:
+        """Monotone cost used by Branch & Bound (minimised).
 
-    def _bound(self, cost: float) -> float:
-        # cost es ya una cota optimista: no anticipamos quemados extra.
-        return cost
+        We only count burned cells here, because that value can only increase
+        as the simulation advances. This makes the pruning condition safe.
+        """
+        libres, quemadas, cortafuegos = counts
+        return float(quemadas)
+
+    def _score(self, counts: tuple[int, int, int], depth: int) -> float:
+        """Heuristic score used to compare leaves with the same burned cells.
+
+        Here we slightly reward having more firebreak cells and penalise
+        going deeper, but this value is *not* used for pruning.
+        """
+        libres, quemadas, cortafuegos = counts
+        return float(quemadas) - 0.05 * cortafuegos + 0.05 * depth
+
+    def _bound(self, bnb_cost: float) -> float:
+        # Cota optimista: reutiliza el costo monotono de quemadas.
+        return bnb_cost
+
+    def _rollout_stay_until_stable(self, area: Area) -> Area:
+        """Simula expansion del fuego si el bombero se queda quieto.
+
+        Es una estimacion pesimista del costo final desde un nodo hoja,
+        que ayuda a comparar mejor las hojas que terminan antes del
+        horizonte de lookahead.
+        """
+        area_copy = self._clone_area(area)
+        while True:
+            to_burn = self._fire.a_quemar(area_copy)
+            if not to_burn:
+                break
+            self._fire.aplicar(area_copy, to_burn)
+            area_copy.tick += 1
+        return area_copy
 
     def _valid_moves(self, node: SearchNode) -> list[tuple[int, int]]:
+        # Genera los movimientos legales desde un nodo de búsqueda.
         ci, cj = node.pos
         moves: list[tuple[int, int]] = []
         for di, dj in MOVES:
             ni, nj = ci + di, cj + dj
             if not node.area.dentro(ni, nj):
-                continue
-            if (ni, nj) in node.forbidden:
                 continue
             if node.area.matrix[ni][nj] != est_celda.sn_af:
                 continue
@@ -84,6 +124,7 @@ class BranchAndBound(strategy_bombero):
         node: SearchNode,
         move: tuple[int, int],
     ) -> SearchNode | None:
+        # Aplica el movimiento, hace avanzar fuego y arma el siguiente nodo.
         ci, cj = node.pos
         ni, nj = move
 
@@ -105,14 +146,17 @@ class BranchAndBound(strategy_bombero):
 
         forbidden_next = self._fire.a_quemar(area_copy)
         counts = area_copy.counts()
-        cost = self._cost(counts, node.depth + 1)
-        bound = self._bound(cost)
+        depth = node.depth + 1
+        bnb_cost = self._bnb_cost(counts, depth)
+        bound = self._bound(bnb_cost)
+        score = self._score(counts, depth)
         path = node.path + [(ni, nj)]
 
         return SearchNode(
             priority=bound,
-            depth=node.depth + 1,
-            cost=cost,
+            depth=depth,
+            bnb_cost=bnb_cost,
+            score=score,
             pos=(ni, nj),
             area=area_copy,
             forbidden=forbidden_next,
@@ -128,18 +172,21 @@ class BranchAndBound(strategy_bombero):
         area: Area,
         forbidden: set[tuple[int, int]],
     ) -> tuple[int, int]:
+        # Punto de entrada: calcula el mejor siguiente paso del bombero.
         start = time.perf_counter()
 
         root_area = self._clone_area(area)
         if root_area.matrix[i][j] == est_celda.bomb:
             root_area.matrix[i][j] = est_celda.c_fuego
         root_counts = root_area.counts()
-        root_cost = self._cost(root_counts, depth=0)
+        root_bnb_cost = self._bnb_cost(root_counts, depth=0)
+        root_score = self._score(root_counts, depth=0)
 
         root = SearchNode(
-            priority=self._bound(root_cost),
+            priority=self._bound(root_bnb_cost),
             depth=0,
-            cost=root_cost,
+            bnb_cost=root_bnb_cost,
+            score=root_score,
             pos=(i, j),
             area=root_area,
             forbidden=set(forbidden),
@@ -154,6 +201,7 @@ class BranchAndBound(strategy_bombero):
         status = "no_move"
 
         while queue:
+            # bucle principal de B&B: saca el mejor nodo, poda y expande hijos
             now = time.perf_counter()
             if (now - start) >= self.time_limit:
                 status = "time_limit"
@@ -170,11 +218,30 @@ class BranchAndBound(strategy_bombero):
             moves = self._valid_moves(node)
 
             if node.depth >= self.lookahead or not moves:
+                # rollout: estimamos costo final si el bombero se queda quieto
+                rollout_area = self._rollout_stay_until_stable(node.area)
+                rollout_counts = rollout_area.counts()
+                rollout_cost = self._bnb_cost(rollout_counts, node.depth)
+                rollout_score = self._score(rollout_counts, node.depth)
+
                 # evitamos elegir la raiz si aun hay movimientos posibles
                 if not (node.depth == 0 and moves):
-                    if node.cost < best_cost:
-                        best_cost = node.cost
-                        best_node = node
+                    if (rollout_cost < best_cost or
+                        (rollout_cost == best_cost and
+                         best_node is not None and
+                         rollout_score < best_node.score)):
+                        best_cost = rollout_cost
+                        best_node = SearchNode(
+                            priority=rollout_cost,
+                            depth=node.depth,
+                            bnb_cost=rollout_cost,
+                            score=rollout_score,
+                            pos=node.pos,
+                            area=rollout_area,
+                            forbidden=node.forbidden,
+                            path=node.path,
+                            counts=rollout_counts,
+                        )
                         status = "ok"
                 continue
 
@@ -193,7 +260,7 @@ class BranchAndBound(strategy_bombero):
 
         if best_node is None:
             best_node = root
-            best_cost = root_cost
+            best_cost = root_bnb_cost
 
         self._last_report = {
             "nodes": nodes_expanded,
@@ -220,6 +287,7 @@ class BranchAndBound(strategy_bombero):
 
     # -------- reportes --------
     def ultima_busqueda(self) -> dict[str, object]:
+        # Estadísticas de la última búsqueda B&B ejecutada.
         return dict(self._last_report)
 
     def resumen_global(
@@ -227,13 +295,17 @@ class BranchAndBound(strategy_bombero):
         area: Area | None = None,
         wall_time: float | None = None,
     ) -> dict[str, object]:
+        # Resumen acumulado para reportes o guardado.
         libres = quemadas = cortafuegos = None
-        cerrado = None
-        instantes = None
         if area is not None:
             libres, quemadas, cortafuegos = area.counts()
-            cerrado = area.limite()
+
+        instantes = None
+        cerrado = None
+        if area is not None:
             instantes = area.tick
+            cerrado = area.limite()
+
         return {
             "nodes": self.total_nodes,
             "estrategia": self._last_report.get("status", "sin_busqueda"),
@@ -247,5 +319,3 @@ class BranchAndBound(strategy_bombero):
         }
 
 
-# Alias para mantener compatibilidad con el nombre previo.
-paredes = BranchAndBound

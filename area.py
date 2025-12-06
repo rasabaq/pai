@@ -35,31 +35,28 @@ class Area: #Clase que maneja toda el area o grid de * + - sirve para tener toda
         return libre, quemado, corta_fuego
     
     def limite(self) -> bool:
-        fire_positions = self.positions(est_celda.fuego)
-        if not fire_positions:
-            return True  # sin fuegos, no se expandirá
+        """
+        Consideramos cerrado si el cortafuego toca al menos dos paredes
+        distintas (superior, inferior, izquierda, derecha). Contamos tanto
+        celdas de cortafuego como la celda actual del bombero.
+        """
         n = self.n
-        queue = list(fire_positions)
-        seen = set(fire_positions)
-        reach_safe = False
-        while queue:
-            i, j = queue.pop(0)
-            for di in (-1, 0, 1):
-                for dj in (-1, 0, 1):
-                    if di == 0 and dj == 0:
-                        continue
-                    ni, nj = i + di, j + dj
-                    if 0 <= ni < n and 0 <= nj < n:
-                        if (ni, nj) in seen:
-                            continue
-                        # si encuentro SAFE, significa que podría expandirse
-                        if self.matrix[ni][nj] == est_celda.sn_af:
-                            reach_safe = True
-                        # puedo seguir expandiendo la búsqueda por cualquier cosa que NO sea cortafuego
-                        if self.matrix[ni][nj] != est_celda.c_fuego:
-                            seen.add((ni, nj))
-                            queue.append((ni, nj))
-        return not reach_safe
+        walls: set[str] = set()
+        for i, row in enumerate(self.matrix):
+            for j, v in enumerate(row):
+                if v not in (est_celda.c_fuego, est_celda.bomb):
+                    continue
+                if i == 0:
+                    walls.add("top")
+                if i == n - 1:
+                    walls.add("bottom")
+                if j == 0:
+                    walls.add("left")
+                if j == n - 1:
+                    walls.add("right")
+                if len(walls) >= 2:
+                    return True
+        return False
 
 
     def to_lines(self) -> list[str]: #Funcion que ayuda a imprimir la matrix en el output

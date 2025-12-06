@@ -14,7 +14,9 @@ class bombero: #Clase encargada de manejar los movimiento del bombero, manejando
 
     def move(self, area: Area, forbidden: set[tuple[int, int]]) -> None: #Maneja los movimiento en base a strategy.py
         ni,nj = self.estrategia.siguiente_paso(self.i, self.j, area, forbidden)
-        if area.dentro(ni,nj) and (ni,nj) not in forbidden and area.matrix[ni][nj] == est_celda.sn_af:
+        # Permitimos movernos a celdas que se quemarian en el proximo tick,
+        # porque el bombero coloca cortafuego antes de que el fuego avance.
+        if area.dentro(ni,nj) and area.matrix[ni][nj] == est_celda.sn_af:
             self.i, self.j = ni,nj
 
         area.matrix[self.i][self.j] = est_celda.bomb

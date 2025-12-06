@@ -1,0 +1,8 @@
+Nodos : 4486
+Estado estrategia : Optima
+Tiempo (seg) : 13.752125300001353
+Numero de instantes : 9
+Posiciones sin afectar : 4
+Posiciones quemadas : 155
+Posiciones con cortafuego : 9
+Cortafuego cerrado : No
