@@ -170,10 +170,12 @@ class BranchAndBound(strategy_bombero):
             moves = self._valid_moves(node)
 
             if node.depth >= self.lookahead or not moves:
-                if node.cost < best_cost:
-                    best_cost = node.cost
-                    best_node = node
-                    status = "ok"
+                # evitamos elegir la raiz si aun hay movimientos posibles
+                if not (node.depth == 0 and moves):
+                    if node.cost < best_cost:
+                        best_cost = node.cost
+                        best_node = node
+                        status = "ok"
                 continue
 
             for mv in moves:
@@ -209,7 +211,11 @@ class BranchAndBound(strategy_bombero):
         if best_node.path:
             return best_node.path[0]
 
-        # Fallback: si no hay camino, mantenemos posicion.
+        # Fallback: elegir algun movimiento valido para no quedarse quieto.
+        fallback_moves = self._valid_moves(root)
+        if fallback_moves:
+            return fallback_moves[0]
+
         return i, j
 
     # -------- reportes --------
