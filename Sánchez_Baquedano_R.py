@@ -33,6 +33,8 @@ def main():
     last_stats = None
     last_finished = None
     last_cerrado = None
+    trace_activa = True  # la traza de B&B se mantiene siempre activa
+    trace_limit: int | None = None  # None = sin limite de eventos
 
     while True:
         print("\n=== MENU ===")
@@ -40,7 +42,8 @@ def main():
         print("2) Salida: ejecutar (final)")
         print("3) Salida: ejecutar hasta instante k")
         print("4) Guardar: output.dat y salida.txt")
-        print("5) Salir")
+        print("5) Mostrar arbol (historial)")
+        print("6) Salir")
 
         op = input("Opcion: ").strip()
 
@@ -54,7 +57,7 @@ def main():
 
             try:
                 n, (x, y), (a, b), area1 = data_carga(input_path)
-                Bombero = bombero(a, b, estrategia=BranchAndBound())
+                Bombero = bombero(a, b, estrategia=BranchAndBound(trace_enabled=trace_activa, trace_limit=trace_limit))
                 last_stats = None
                 last_finished = None
                 last_cerrado = None
@@ -130,6 +133,17 @@ def main():
                 print(f"[ERROR] Guardado: {e}")
 
         elif op == "5":
+            if area1 is None or Bombero is None:
+                print("Primero cargue el input (opcion 1).")
+                continue
+            if not isinstance(Bombero.estrategia, BranchAndBound):
+                print("La estrategia actual no es BranchAndBound.")
+                continue
+            print("\n--- Traza Branch&Bound (historial) ---")
+            print(Bombero.estrategia.arbol_historial(max_busquedas=None, max_eventos=None))
+            print("--- Fin traza ---")
+
+        elif op == "6":
             print("Adios!")
             break
 
