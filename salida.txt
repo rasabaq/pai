@@ -1,8 +1,8 @@
-Nodos : 28
-Estado estrategia : Optima
-Tiempo (seg) : 0.015266200000041863
-Numero de instantes : 3
-Posiciones sin afectar : 2
-Posiciones quemadas : 19
-Posiciones con cortafuego : 3
-Cortafuego cerrado : Si
+Nodos : 908
+Estado estrategia : Factible (eval_limit)
+Tiempo (seg) : 6.587982800003374
+Numero de instantes : 7
+Posiciones sin afectar : 0
+Posiciones quemadas : 114
+Posiciones con cortafuego : 6
+Cortafuego cerrado : No

@@ -1,152 +1,139 @@
 import time
 
-from celdas import est_celda
-from area import Area
 from comp_fuego import fuego
 from comp_bombero import bombero
-from branch_and_bound import BranchAndBound
+from iterated_local_search import IteratedLocalSearch
+from variable_neighborhood_search import VariableNeighborhoodSearch
 from loader import data_carga
-from writer import guardar_salida, guardar_salida_txt
+from writer import guardar_salida_txt
 from simulation import Simulation
 
-DEFAULT_INPUT_PATH = "input.dat"
-INPUT_CHOICES = {
-    "1": "input1.dat",
-    "2": "input2.dat",
-    "3": "input3.dat",
-    "4": "input4.dat",
-    "5": "input5.dat",
-    "6": "input6.dat",
-    "7": "input7.dat",
-    "8": "input8.dat",
-    "9": "input9.dat",
-    "10": "input10.dat",
-}
-OUTPUT_PATH = "output.dat"
-SALIDA_PATH = "salida.txt"
+INPUT_CHOICES = {str(i): f"input{i}.dat" for i in range(1, 21)}
+SEEDS = list(range(10))  # 10 ejecuciones con 10 semillas distintas
+SALIDAS = {"ils": "salidaA1.txt", "vns": "salidaA2.txt"}
+
+
+def _seleccionar_inputs() -> list[str] | None:
+    seleccion = input("Seleccione input [1-20] o 'todos': ").strip().lower()
+    if seleccion in ("todos", "todo", "all", "*"):
+        return [INPUT_CHOICES[k] for k in sorted(INPUT_CHOICES.keys(), key=int)]
+    if seleccion.startswith("input"):
+        seleccion = seleccion[5:]
+    if seleccion in INPUT_CHOICES:
+        return [INPUT_CHOICES[seleccion]]
+    print("Opcion de input invalida. Ingrese un numero entre 1 y 20 o 'todos'.")
+    return None
+
+
+def _crear_estrategia(factory, seed: int):
+    try:
+        return factory(seed=seed)
+    except TypeError:
+        return factory()
+
+
+def _correr_ejecucion(
+    estrategia_factory,
+    input_path: str,
+    seed: int,
+) -> tuple[int, float] | None:
+    try:
+        _, fuego_pos, bombero_pos, area = data_carga(input_path)
+    except Exception as e:
+        print(f"[ERROR] No se pudo cargar {input_path}: {e}")
+        return None
+
+    comp_bombero = bombero(bombero_pos[0], bombero_pos[1], estrategia=_crear_estrategia(estrategia_factory, seed))
+    comp_fuego = fuego(tasa_crecimiento=1)
+    sim = Simulation(area, comp_fuego, comp_bombero)
+
+    start = time.perf_counter()
+    sim.run_until_stable()
+    elapsed = time.perf_counter() - start
+
+    stats = comp_bombero.estrategia.resumen_global(area=area, wall_time=elapsed)
+    costo = stats.get("quemadas")
+    if costo is None:
+        costo = area.counts()[1]
+
+    return costo, elapsed
+
+
+def _procesar_input(
+    nombre_estrategia: str,
+    estrategia_factory,
+    input_path: str,
+) -> list[str] | None:
+    resultados: list[tuple[int, float]] = []
+    for seed in SEEDS:
+        ejec = _correr_ejecucion(estrategia_factory, input_path, seed)
+        if ejec is None:
+            return None
+        resultados.append(ejec)
+
+    costos = [c for c, _ in resultados]
+    tiempos = [t for _, t in resultados]
+    mejor_costo = min(costos)
+    costo_prom = sum(costos) / len(costos)
+    tiempo_prom = sum(tiempos) / len(tiempos)
+
+    lineas: list[str] = []
+    lineas.append(f"# {nombre_estrategia.upper()} - {input_path}")
+    lineas.append("instancia,mejor_costo,error_relativa,costo_promedio,tiempo_promedio")
+    for idx, (costo, _) in enumerate(resultados, start=1):
+        error_rel = 0.0 if mejor_costo == 0 else (costo - mejor_costo) / mejor_costo
+        lineas.append(f"{idx},{mejor_costo},{error_rel:.6f},{costo_prom:.6f},{tiempo_prom:.6f}")
+    lineas.append("")
+
+    print(
+        f"[OK] {nombre_estrategia.upper()} - {input_path}: mejor_costo={mejor_costo}, "
+        f"costo_prom={costo_prom:.4f}, tiempo_prom={tiempo_prom:.4f}s"
+    )
+    return lineas
+
+
+def _ejecutar_metaheuristica(nombre: str, estrategia_factory) -> None:
+    inputs = _seleccionar_inputs()
+    if not inputs:
+        return
+
+    salida_path = SALIDAS[nombre]
+    contenido: list[str] = []
+
+    for input_path in inputs:
+        seccion = _procesar_input(nombre, estrategia_factory, input_path)
+        if seccion is None:
+            continue
+        contenido.extend(seccion)
+
+    if not contenido:
+        print("[ERROR] No se genero informacion para guardar.")
+        return
+
+    try:
+        with open(salida_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(contenido))
+        print(f"[OK] Reporte guardado en {salida_path}")
+    except Exception as e:
+        print(f"[ERROR] No se pudo guardar {salida_path}: {e}")
 
 
 def main():
-    area1 = None
-    Fuego = fuego(tasa_crecimiento=1)  # puede ajustar la tasa aqui
-    Bombero = None
-    last_stats = None
-    last_finished = None
-    last_cerrado = None
-    trace_activa = True  # la traza de B&B se mantiene siempre activa
-    trace_limit: int | None = None  # None = sin limite de eventos
-
     while True:
-        print("\n=== MENU ===")
-        print("1) Lectura: cargar input (1-10=inputX.dat, enter=input.dat)")
-        print("2) Salida: ejecutar (final)")
-        print("3) Salida: ejecutar hasta instante k")
-        print("4) Guardar: output.dat y salida.txt")
-        print("5) Mostrar arbol (historial)")
-        print("6) Salir")
+        print("\n=== MENU METAHEURISTICAS ===")
+        print("1) Ejecutar metaheuristica ILS")
+        print("2) Ejecutar metaheuristica VNS")
+        print("3) Salir")
 
-        op = input("Opcion: ").strip()
+        op = input("Opcion: ").strip().lower()
 
-        if op == "1":
-            selected = input("Seleccione input [1-10] o Enter para input.dat: ").strip()
-            input_path = INPUT_CHOICES.get(selected, DEFAULT_INPUT_PATH if selected == "" else None)
-
-            if input_path is None:
-                print("Opcion de input invalida.")
-                continue
-
-            try:
-                n, (x, y), (a, b), area1 = data_carga(input_path)
-                Bombero = bombero(a, b, estrategia=BranchAndBound(trace_enabled=trace_activa, trace_limit=trace_limit))
-                last_stats = None
-                last_finished = None
-                last_cerrado = None
-                print(
-                    f"[OK] Cargado {input_path} (n={n}, fuego=({x},{y}), bombero=({a},{b}))"
-                )
-            except Exception as e:
-                print(f"[ERROR] Lectura: {e}")
-
-        elif op == "2":
-            if area1 is None or Bombero is None:
-                print("Primero cargue el input (opcion 1).")
-                continue
-            start = time.perf_counter()
-            sim = Simulation(area1, Fuego, Bombero)
-            steps = sim.run_until_stable()
-            wall_time = time.perf_counter() - start
-            last_finished = (len(Fuego.a_quemar(area1)) == 0)
-            last_cerrado = area1.limite()
-            last_stats = Bombero.estrategia.resumen_global(area=area1, wall_time=wall_time)
-            print(f"[OK] Simulacion finalizada en t={area1.tick} (pasos={steps}).")
-            print(
-                f"    Nodos explorados: {last_stats['nodes']}, "
-                f"estado estrategia: {last_stats['estrategia']}, "
-                f"tiempo (s): {last_stats['tiempo_total_sec']:.4f}"
-            )
-            try:
-                guardar_salida_txt(SALIDA_PATH, last_stats, cerrado=last_cerrado)
-                print(f"    Resumen guardado en {SALIDA_PATH}")
-            except Exception as e:
-                print(f"[ERROR] Guardar salida.txt: {e}")
-
-        elif op == "3":
-            if area1 is None or Bombero is None:
-                print("Primero cargue el input (opcion 1).")
-                continue
-            try:
-                k = int(input("Ingrese instante k: "))
-            except ValueError:
-                print("Instante invalido.")
-                continue
-            start = time.perf_counter()
-            sim = Simulation(area1, Fuego, Bombero)
-            steps = sim.run_until_tick(k)
-            wall_time = time.perf_counter() - start
-            last_finished = (len(Fuego.a_quemar(area1)) == 0)
-            last_cerrado = area1.limite()
-            last_stats = Bombero.estrategia.resumen_global(area=area1, wall_time=wall_time)
-            print(f"[OK] Simulacion ejecutada hasta t={area1.tick} (pasos={steps}).")
-            print(
-                f"    Nodos explorados: {last_stats['nodes']}, "
-                f"estado estrategia: {last_stats['estrategia']}, "
-                f"tiempo (s): {last_stats['tiempo_total_sec']:.4f}"
-            )
-            try:
-                guardar_salida_txt(SALIDA_PATH, last_stats, cerrado=last_cerrado)
-                print(f"    Resumen guardado en {SALIDA_PATH}")
-            except Exception as e:
-                print(f"[ERROR] Guardar salida.txt: {e}")
-
-        elif op == "4":
-            if area1 is None:
-                print("Nada que guardar (cargue y ejecute primero).")
-                continue
-            finished = (len(Fuego.a_quemar(area1)) == 0) if last_finished is None else last_finished
-            cerrado = area1.limite() if last_cerrado is None else last_cerrado
-            stats_to_save = last_stats or Bombero.estrategia.resumen_global(area=area1, wall_time=None)
-            try:
-                guardar_salida(OUTPUT_PATH, area1)
-                guardar_salida_txt(SALIDA_PATH, stats_to_save, cerrado=cerrado)
-                print(f"[OK] Guardados: {OUTPUT_PATH}, {SALIDA_PATH}")
-            except Exception as e:
-                print(f"[ERROR] Guardado: {e}")
-
-        elif op == "5":
-            if area1 is None or Bombero is None:
-                print("Primero cargue el input (opcion 1).")
-                continue
-            if not isinstance(Bombero.estrategia, BranchAndBound):
-                print("La estrategia actual no es BranchAndBound.")
-                continue
-            print("\n--- Traza Branch&Bound (historial) ---")
-            print(Bombero.estrategia.arbol_historial(max_busquedas=None, max_eventos=None))
-            print("--- Fin traza ---")
-
-        elif op == "6":
+        if op == "1" or op in ("i", "ils"):
+            _ejecutar_metaheuristica("ils", IteratedLocalSearch)
+        elif op == "2" or op in ("v", "vns"):
+            _ejecutar_metaheuristica("vns", VariableNeighborhoodSearch)
+        elif op == "3" or op in ("s", "salir", "q", "quit"):
             print("Adios!")
             break
-
         else:
             print("Opcion invalida.")
 
